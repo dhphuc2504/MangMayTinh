@@ -1,1 +1,0 @@
-// Chức năng relay message giữa web ↔ agent
