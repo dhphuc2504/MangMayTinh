@@ -1,5 +1,13 @@
 Chỉ mới tạo ra UI cơ bản của trang client.
+
+bên web client: gửi role (web client / agent client) trên url
+
 Cấu trúc gói tin:
+
+{
+  "type": "register",
+  "role": "web_client"
+}
 
 {
   "target": "cpp_server",

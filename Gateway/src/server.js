@@ -1,5 +1,6 @@
 const WebSocket = require('ws');
 
+
 // Khởi tạo WebSocket server
 const wss = new WebSocket.Server({ port: 8080 }, () => {
   console.log('WebSocket server running on ws://localhost:8080');
@@ -9,53 +10,49 @@ const wss = new WebSocket.Server({ port: 8080 }, () => {
 let webClient = null;
 let agentClient = null; // agent cố định "cpp_server"
 
-wss.on('connection', (ws, req) => {
-  const params = new URL(req.url, 'http://localhost').searchParams;
-  const role = params.get('role');
+wss.on("connection", (ws) => {
+  console.log("A client connected. Waiting for register...");
 
-  if (role === 'web') {
-    webClient = ws;
-    console.log('Web client connected');
-  } else if (role === 'agent') {
-    agentClient = ws;
-    console.log('Agent (cpp_server) connected');
-  } else {
-    console.log('Unknown client role, closing connection');
-    ws.close();
-    return;
-  }
+  ws.role = null;
 
-  ws.on('message', (msg) => {
+  ws.on("message", (msg) => {
     let data;
     try {
-      data = JSON.parse(msg.toString());
-    } catch (e) {
-      console.log('Invalid JSON received:', msg.toString());
+      data = JSON.parse(msg);
+    } catch (err) {
+      console.log("Invalid JSON:", msg);
+      return; // ignore non-JSON messages
+    }
+
+    // Handle registration
+    if (data.type === "register") {
+      ws.role = data.role;
+      console.log("Client registered as:", role);
+
+      if (ws.role === "web_client") {
+        webClient = ws;
+        console.log("Web client connected");
+      } else if (ws.role === "agent") {
+        agentClient = ws;
+        console.log("Agent (cpp_server) connected");
+      } else {
+        console.log("Unknown role, disconnecting");
+        ws.close();
+      }
       return;
     }
 
-    // Nếu message từ web client
-  if (ws === webClient) {
-    if (agentClient && agentClient.readyState === WebSocket.OPEN) {
+    // --- ROUTING LOGIC ---
+    if (ws === webClient && agentClient) {
       agentClient.send(msg);
-    } else {
-      console.log('Agent not connected yet, cannot forward');
-    }
-  }
-
-  // Nếu message từ agent client
-  else if (ws === agentClient) {
-    if (webClient && webClient.readyState === WebSocket.OPEN) {
+    } else if (ws === agentClient && webClient) {
       webClient.send(msg);
-    } else {
-      console.log('Web client not connected yet, cannot forward');
     }
-  }
   });
 
   ws.on('close', () => {
-    console.log(`${role} disconnected`);
-    if (role === 'web') webClient = null;
-    if (role === 'agent') agentClient = null;
+    console.log(`${ws.role} disconnected`);
+    if (ws.role === 'web_client') webClient = null;
+    if (ws.role === 'agent') agentClient = null;
   });
 });
