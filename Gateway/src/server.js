@@ -27,7 +27,7 @@ wss.on("connection", (ws) => {
     // Handle registration
     if (data.type === "register") {
       ws.role = data.role;
-      console.log("Client registered as:", role);
+      console.log("Client registered as:", ws.role);
 
       if (ws.role === "web_client") {
         webClient = ws;
